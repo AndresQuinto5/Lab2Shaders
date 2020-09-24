@@ -9,6 +9,7 @@ class Obj(object):
 
         self.vertices = []
         self.faces = []
+        self.normals = []
         self.read()
 
     def read(self):
@@ -19,8 +20,15 @@ class Obj(object):
                 # Split vertices
                 if prefix == 'v':
                     # vertice
-                    self.vertices.append(list(map(float, value.split(' '))))
+                    self.vertices.append(
+                        list(map(float, value.split(' ')))
+                    )
+                # Split normals
+                elif prefix == 'vn':
+                    self.normals.append(list(map(float,value.split(' '))))
                 # Split faces
                 elif prefix == 'f':
-                    # face
-                    self.faces.append ([ list(map(int , face.split('/'))) for face in value.split(' ') ])
+                    # Face
+                    self.faces.append (
+                        [ list(map(int , face.split('/'))) for face in value.split(' ') ]
+                    )

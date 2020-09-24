@@ -4,7 +4,98 @@
 
 import struct
 from obj import Obj
+from collections import namedtuple
 
+V2 = namedtuple("Vertex2", ["x", "y"])
+V3 = namedtuple("Vertex3", ["x", "y", "z"])
+
+def sum(v0, v1):
+    """
+        Input: 2 size 3 vectors
+        Output: Size 3 vector with the per element sum
+    """
+    return V3(v0.x + v1.x, v0.y + v1.y, v0.z + v1.z)
+
+
+def sub(v0, v1):
+    """
+        Input: 2 size 3 vectors
+        Output: Size 3 vector with the per element substraction
+    """
+    return V3(v0.x - v1.x, v0.y - v1.y, v0.z - v1.z)
+
+
+def mul(v0, k):
+    """
+        Input: 2 size 3 vectors
+        Output: Size 3 vector with the per element multiplication
+    """
+    return V3(v0.x * k, v0.y * k, v0.z * k)
+
+
+def dot(v0, v1):
+    """
+        Input: 2 size 3 vectors
+        Output: Scalar with the dot product
+    """
+    return v0.x * v1.x + v0.y * v1.y + v0.z * v1.z
+
+
+def length(v0):
+    """
+        Input: 1 size 3 vector
+        Output: Scalar with the length of the vector
+    """
+    return (v0.x ** 2 + v0.y ** 2 + v0.z ** 2) ** 0.5
+
+
+def norm(v0):
+    """
+        Input: 1 size 3 vector
+        Output: Size 3 vector with the normal of the vector
+    """
+    v0length = length(v0)
+
+    if not v0length:
+        return V3(0, 0, 0)
+
+    return V3(v0.x / v0length, v0.y / v0length, v0.z / v0length)
+
+
+def bbox(*vertices):
+    xs = [vertex.x for vertex in vertices]
+    ys = [vertex.y for vertex in vertices]
+
+    xs.sort()
+    ys.sort()
+
+    xmin = xs[0]
+    xmax = xs[-1]
+    ymin = ys[0]
+    ymax = ys[-1]
+
+    return xmin, xmax, ymin, ymax
+
+
+def cross(v1, v2):
+    return V3(
+        v1.y * v2.z - v1.z * v2.y, v1.z * v2.x - v1.x * v2.z, v1.x * v2.y - v1.y * v2.x,
+    )
+
+
+def barycentric(A, B, C, P):
+    cx, cy, cz = cross(
+        V3(B.x - A.x, C.x - A.x, A.x - P.x), V3(B.y - A.y, C.y - A.y, A.y - P.y),
+    )
+
+    if abs(cz) < 1:
+        return -1, -1, -1
+
+    u = cx / cz
+    v = cy / cz
+    w = 1 - (cx + cy) / cz
+
+    return w, v, u
 
 def char(myChar):
 		return struct.pack('=c', myChar.encode('ascii'))
@@ -18,12 +109,13 @@ def dword(myChar):
 def normalizeColorArray(colors_array):
     return [round(i*255) for i in colors_array]
 
-def color(r,g,b):
-	return bytes([b, g, r])
+PLANET = "PLANET"
+RING = "RING"
+
+def color(r, g, b):
+    return bytes([int(b * 255), int(g * 255), int(r * 255)])
 
 #Por motivos practicos seteo el color para mi fondo siempre.
-Dark = color(0,0,0)
-
 class Render(object):
     def __init__(self):
         self.framebuffer = []
@@ -34,9 +126,15 @@ class Render(object):
         self.viewport_width = 1200
         self.viewport_height = 1200
         self.glClear()
+        self.zbuffer = [
+            [-9999999 for x in range(self.width)] for y in range(self.height)
+        ]
+        # Para uso del shader
+        self.shape = None
+        self.light = ()
 
-    def point(self, x, y):
-        self.framebuffer[y][x] = self.color
+    def point(self, x, y, color):
+        self.framebuffer[y][x] = color
 
     def glCreateWindow(self, width, height):
         self.height = height
@@ -49,6 +147,7 @@ class Render(object):
         self.viewport_width = width
 
     def glClear(self):
+        Dark = color(0,0,0)
         self.framebuffer = [
             [Dark for x in range(self.width)] for y in range(self.height)
         ]
@@ -62,66 +161,193 @@ class Render(object):
             [clearColor for x in range(self.width)] for y in range(self.height)
         ]
 
-    def glVertex(self, x, y):
-        final_x = round((x+1) * (self.viewport_width/2) + self.viewport_x)
-        final_y = round((y+1) * (self.viewport_height/2) + self.viewport_y)
-        self.point(final_x, final_y)
+    def triangle(self, A, B, C, normals):
+        xmin, xmax, ymin, ymax = bbox(A, B, C)
 
-    def glColor(self, r=0, g=0, b=0):
-        normalized = normalizeColorArray([r,g,b])
-        self.color = color(normalized[0], normalized[1], normalized[2])
+        for x in range(xmin, xmax + 1):
+            for y in range(ymin, ymax + 1):
+                P = V2(x, y)
+                w, v, u = barycentric(A, B, C, P)
+                if w < 0 or v < 0 or u < 0:
+                    # point is outside
+                    continue
 
-    def glCoordinate(self, value, is_vertical):
-        real_coordinate = ((value+1) * (self.viewport_height/2) + self.viewport_y) if is_vertical else ((value+1) * (self.viewport_width/2) + self.viewport_x)
-        return round(real_coordinate)
+                z = A.z * u + B.z * v + C.z * w
 
-    def glLine(self, x0, y0, x1, y1) :
-#Referencia de la calse de dennis y su repositorio
-        steep = abs(y1 - y0) > abs(x1 - x0)
+                r, g, b = self.shader(
+                    x,
+                    y,
+                    barycentricCoords = (u, v, w),
+                    normals=normals
+                )
 
-        if steep:
-            x0, y0 = y0, x0
-            x1, y1 = y1, x1
+                shader_color = color(r, g, b)
 
-        if x0 > x1:
-            x0, x1 = x1, x0
-            y0, y1 = y1, y0
+                if z > self.zbuffer[x][y]:
+                    self.point(x, y, shader_color)
+                    self.zbuffer[x][y] = z
 
-        dx = abs(x1 - x0)
-        dy = abs(y1 - y0)
+    def check_ellipse(self, x, y, a, b):
+        return round((x ** 2) * (b ** 2)) + ((y ** 2) * (a ** 2)) <= round(a ** 2) * (
+            b ** 2
+        )
 
-        offset = 0 
-        y = y0
-        threshold =  dx
+    def shader(self, x=0, y=0, barycentricCoords = (), normals=()):
+        # Planet bounds:
+        # Y: 240 - 560
 
-        for x in range(x0, x1):
-            self.point(y, x) if steep else self.point(x, y)
-            
-            offset += 2*dy
+        shader_color = 0, 0, 0
+        current_shape = self.shape 
+        u, v, w = barycentricCoords
+        na, nb, nc = normals
 
-            if offset >= threshold:
-                y += -1 if y0 > y1 else 1
-                threshold += 2*dx
-#Clase trabajada en clase
-    def load(self, filename='default.obj', translate=[0,0], scale=[1,1]):
+        if current_shape == PLANET:
+            if y < 280 or y > 520:
+                shader_color = 156, 152, 164
+            elif y < 320 or y > 480:
+                shader_color = 146, 160, 180
+            elif y < 360 or y > 420:
+                shader_color = 105, 145, 170
+            else:
+                shader_color = 136, 190, 222
+        # Ring bounds:
+        # X - Hole: 200 - 600
+        # Y - Hole: 380 - 420
+        # So, if we use the equation of an ellipse, where a > b
+        # the value must be a=200 and b=20
+        elif current_shape == RING:
+            # Filling from inside to outside
+            x0, y0 = x - 400, y - 400
+            a, b = 250, 25
+
+            # First ellipse
+            is_ellipse = self.check_ellipse(x0, y0, a, b)
+            if is_ellipse:
+                shader_color = 66, 76, 84
+            else:
+                # Second ellipse
+                a += 50
+                b += 5
+                is_ellipse = self.check_ellipse(x0, y0, a, b)
+                if is_ellipse:
+                    shader_color = 94, 102, 116
+                else:
+                    # Third ellipse
+                    a += 25
+                    b += 5
+                    is_ellipse = self.check_ellipse(x0, y0, a, b)
+                    if is_ellipse:
+                        shader_color = 0, 0, 0
+                    else:
+                        # Fourth ellipse
+                        a += 75
+                        b += 10
+                        is_ellipse = self.check_ellipse(x0, y0, a, b)
+                        if is_ellipse:
+                            shader_color = 62, 72, 78
+
+        b, g, r = shader_color
+
+        b /= 255
+        g /= 255
+        r /= 255
+
+        nx = na[0] * u + nb[0] * v + nc[0] * w
+        ny = na[1] * u + nb[1] * v + nc[1] * w
+        nz = na[2] * u + nb[2] * v + nc[2] * w
+
+        normal = V3(nx, ny, nz)
+        light = V3(0.700, 0.700, 0.750)
+
+        intensity = dot(norm(normal), norm(light))
+
+        b *= intensity
+        g *= intensity
+        r *= intensity
+
+        if intensity > 0:
+            return r, g, b
+        else:
+            return 0,0,0
+
+    def load(self, filename="default.obj", translate=[0, 0], scale=[1, 1], shape=None):
         model = Obj(filename)
+        self.shape = shape
+
 
         for face in model.faces:
             vcount = len(face)
 
-            for j in range(vcount):
-                vi1 = face[j][0] - 1
-                vi2 = face[(j + 1) % vcount][0] - 1
+            if vcount == 3:
+                face1 = face[0][0] - 1
+                face2 = face[1][0] - 1
+                face3 = face[2][0] - 1
 
-                v1 = model.vertices[vi1]
-                v2 = model.vertices[vi2]
+                v1 = model.vertices[face1]
+                v2 = model.vertices[face2]
+                v3 = model.vertices[face3]
 
                 x1 = round((v1[0] * scale[0]) + translate[0])
                 y1 = round((v1[1] * scale[1]) + translate[1])
+                z1 = round((v1[2] * scale[2]) + translate[2])
+
                 x2 = round((v2[0] * scale[0]) + translate[0])
                 y2 = round((v2[1] * scale[1]) + translate[1])
+                z2 = round((v2[2] * scale[2]) + translate[2])
 
-                self.glLine(x1, y1, x2, y2)
+                x3 = round((v3[0] * scale[0]) + translate[0])
+                y3 = round((v3[1] * scale[1]) + translate[1])
+                z3 = round((v3[2] * scale[2]) + translate[2])
+
+                a = V3(x1, y1, z1)
+                b = V3(x2, y2, z2)
+                c = V3(x3, y3, z3)
+
+                vn0 = model.normals[face1]
+                vn1 = model.normals[face2]
+                vn2 = model.normals[face3]
+
+                self.triangle(a, b, c, normals=(vn0, vn1, vn2))
+
+            else:
+                face1 = face[0][0] - 1
+                face2 = face[1][0] - 1
+                face3 = face[2][0] - 1
+                face4 = face[3][0] - 1
+
+                v1 = model.vertices[face1]
+                v2 = model.vertices[face2]
+                v3 = model.vertices[face3]
+                v4 = model.vertices[face4]
+
+                x1 = round((v1[0] * scale[0]) + translate[0])
+                y1 = round((v1[1] * scale[1]) + translate[1])
+                z1 = round((v1[2] * scale[2]) + translate[2])
+
+                x2 = round((v2[0] * scale[0]) + translate[0])
+                y2 = round((v2[1] * scale[1]) + translate[1])
+                z2 = round((v2[2] * scale[2]) + translate[2])
+
+                x3 = round((v3[0] * scale[0]) + translate[0])
+                y3 = round((v3[1] * scale[1]) + translate[1])
+                z3 = round((v3[2] * scale[2]) + translate[2])
+
+                x4 = round((v4[0] * scale[0]) + translate[0])
+                y4 = round((v4[1] * scale[1]) + translate[1])
+                z4 = round((v4[2] * scale[2]) + translate[2])
+
+                a = V3(x1, y1, z1)
+                b = V3(x2, y2, z2)
+                c = V3(x3, y3, z3)
+                d = V3(x4, y4, z4)
+
+                vn0 = model.normals[face1]
+                vn1 = model.normals[face2]
+                vn2 = model.normals[face3]
+                vn3 = model.normals[face4]
+
+                self.triangle(a, b, c, normals=(vn0, vn1, vn2))
+                self.triangle(a, c, d, normals=(vn0, vn2, vn3))
 
 
     def glFinish(self, filename='output.bmp'):
